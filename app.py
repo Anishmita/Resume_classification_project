@@ -1,162 +1,116 @@
 import streamlit as st
-from utils import fetch_news_articles, generate_report, generate_tts
-import os
-import matplotlib.pyplot as plt
+import docx
+import pickle
+import re
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+import numpy as np
+from encoder import LabelEncoder  # Assuming encoder.py contains a custom LabelEncoder
+
+# Download NLTK resources
+nltk.download('stopwords')
+nltk.download('wordnet')
+nltk.download('punkt')
+
+# Initialize text processing tools
+lemmatizer = WordNetLemmatizer()
+stop_words = set(stopwords.words('english'))
+
+def extract_text_from_docx(file):
+    """Extract text from DOCX file"""
+    doc = docx.Document(file)
+    return "\n".join([para.text for para in doc.paragraphs if para.text])
+
+def preprocess_resume_text(text):
+    """
+    Preprocess resume text to match training data format
+    """
+    # Convert to lowercase
+    text = text.lower()
+    
+    # Remove special characters but keep spaces
+    text = re.sub(r'[^a-zA-Z\s]', ' ', text)
+    
+    # Remove extra whitespace and newlines
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    # Tokenize and lemmatize
+    tokens = nltk.word_tokenize(text)
+    tokens = [lemmatizer.lemmatize(word) for word in tokens if word not in stop_words]
+    
+    return ' '.join(tokens)
+
+@st.cache_resource
+def load_models():
+    """Load all required models with caching"""
+    try:
+        # Load TF-IDF vectorizer
+        with open('tfidf.pkl', 'rb') as f:
+            tfidf = pickle.load(f)
+        
+        # Load Gradient Boosting model
+        with open('gradient_boosting.pkl', 'rb') as f:
+            model = pickle.load(f)
+        
+        # Initialize LabelEncoder (assuming encoder.py contains the class)
+        le = LabelEncoder()
+        
+        return tfidf, model, le
+    except Exception as e:
+        st.error(f"Error loading models: {str(e)}")
+        return None, None, None
 
 def main():
-    st.set_page_config(page_title="News Sentiment Analyzer", layout="wide")
-    st.title("📰 Company News Sentiment Analyzer")
+    st.title("Resume Classification System")
+    st.markdown("Upload a resume in DOCX format to classify its category")
     
-    # Input section
-    with st.form(key="analysis_form"):
-        company_name = st.text_input("Enter company name:", placeholder="Tesla, Apple, etc.")
+    # Load models
+    tfidf, model, le = load_models()
+    
+    if tfidf is None or model is None or le is None:
+        st.error("Failed to load required models. Please check your model files.")
+        return
+    
+    # File uploader
+    uploaded_file = st.file_uploader("Choose a DOCX resume file", type="docx")
+    
+    if uploaded_file is not None:
+        # Extract and preprocess text
+        raw_text = extract_text_from_docx(uploaded_file)
+        processed_text = preprocess_resume_text(raw_text)
         
-        if 'NEWSAPI_KEY' in st.secrets:
-            api_key = st.secrets['NEWSAPI_KEY']
-            st.info("Using secured NewsAPI key")
+        # Display sections
+        with st.expander("View Extracted Resume Text"):
+            st.text(raw_text[:3000] + ("..." if len(raw_text) > 3000 else ""))
+        
+        with st.expander("View Processed Text"):
+            st.text(processed_text[:2000] + ("..." if len(processed_text) > 2000 else ""))
+        
+        # Transform and predict
+        text_tfidf = tfidf.transform([processed_text])
+        prediction = model.predict(text_tfidf)
+        
+        # Get probabilities if available
+        if hasattr(model, 'predict_proba'):
+            probabilities = model.predict_proba(text_tfidf)[0]
+            top_classes = np.argsort(probabilities)[::-1][:5]  # Top 5 predictions
+            
+            st.subheader("Classification Results")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.metric("Predicted Category", le.inverse_transform(prediction)[0])
+            
+            with col2:
+                st.metric("Confidence Score", f"{max(probabilities)*100:.1f}%")
+            
+            st.subheader("Top 5 Possible Categories")
+            for i, class_idx in enumerate(top_classes):
+                prob = probabilities[class_idx]
+                st.progress(prob, text=f"{le.inverse_transform([class_idx])[0]}: {prob*100:.1f}%")
         else:
-            api_key = st.text_input("Enter NewsAPI key:", type="password")
-        
-        submitted = st.form_submit_button("🚀 Analyze News", type="primary")
-    
-    if submitted:
-        if not company_name:
-            st.warning("Please enter a company name")
-            return
-            
-        if not api_key:
-            st.error("API key is required")
-            return
-            
-        with st.spinner("🔍 Fetching and analyzing news..."):
-            try:
-                news_data = fetch_news_articles(company_name, api_key)
-                if not news_data:
-                    st.error("No news found. Try a different company.")
-                    return
-                
-                report = generate_report(news_data, company_name)
-                
-                # 1. Overall Summary
-                with st.expander("📊 Overall Summary", expanded=True):
-                    cols = st.columns(3)
-                    sentiment_dist = report['Comparative Sentiment Score']['Sentiment Distribution']
-                    cols[0].metric("Positive", sentiment_dist['Positive'])
-                    cols[1].metric("Negative", sentiment_dist['Negative'])
-                    cols[2].metric("Neutral", sentiment_dist['Neutral'])
-                    
-                    sentiment = report['Final Sentiment Analysis']
-                    if "Positive" in sentiment:
-                        st.success(sentiment)
-                    elif "Negative" in sentiment:
-                        st.error(sentiment)
-                    else:
-                        st.warning(sentiment)
-                
-                # 2. Articles Display
-                st.header("📰 News Articles")
-                for i, article in enumerate(report["Articles"]):
-                    with st.expander(f"Article {i+1}: {article['Title']}"):
-                        st.caption(f"Sentiment: {article['Sentiment']}")
-                        st.write(article["Summary"])
-                        
-                        if article.get('url') and article['url'] not in ["", "#"]:
-                            st.markdown(f"**Read full article:** [Link]({article['url']})")
-                        else:
-                            st.warning("Original article URL not available")
-                        
-                        st.markdown("**Topics:** " + ", ".join(article['Topics']))
-                
-                # 3. Comparative Analysis
-                with st.expander("🔍 Comparative Analysis"):
-                    # Sentiment Charts
-                    fig, ax = plt.subplots(1, 2, figsize=(10,4))
-                    
-                    # Bar chart
-                    ax[0].bar(
-                        report['Comparative Sentiment Score']['Sentiment Distribution'].keys(),
-                        report['Comparative Sentiment Score']['Sentiment Distribution'].values(),
-                        color=['green', 'red', 'orange']
-                    )
-                    ax[0].set_title("Sentiment Distribution")
-                    
-                    # Pie chart
-                    ax[1].pie(
-                        report['Comparative Sentiment Score']['Sentiment Distribution'].values(),
-                        labels=report['Comparative Sentiment Score']['Sentiment Distribution'].keys(),
-                        autopct='%1.1f%%',
-                        colors=['green', 'red', 'orange']
-                    )
-                    ax[1].set_title("Sentiment Ratio")
-                    st.pyplot(fig)
-                    
-                    # Coverage Differences
-                    st.subheader("Coverage Differences")
-                    for diff in report['Comparative Sentiment Score']['Coverage Differences']:
-                        col1, col2 = st.columns([3,1])
-                        col1.write(f"**Comparison:** {diff['Comparison']}")
-                        col2.write(f"**Impact:** {diff['Impact']}")
-                        st.divider()
-                    
-                    # Topic Analysis
-                    st.subheader("Topic Analysis")
-                    st.write("**Common Topics:** " + 
-                            ", ".join(report['Comparative Sentiment Score']['Topic Overlap']['Common Topics']))
-                    
-                    st.write("**Unique Topics:**")
-                    for unique in report['Comparative Sentiment Score']['Topic Overlap']['Unique Topics']:
-                        for art, topics in unique.items():
-                            st.write(f"- {art}: {', '.join(topics)}")
-                
-                # 4. Audio Summary
-                if report.get('Audio'):
-                    with st.expander("🎧 Hindi Audio Summary", expanded=False):
-                        try:
-                            if not os.path.exists(report['Audio']):
-                                # Prepare articles data with consistent structure
-                                audio_articles = [
-                                    {
-                                        'Title': article['Title'],
-                                       'Summary': article['Summary'][:300] + "..." if len(article['Summary']) > 300 else article['Summary']
-                                    } 
-                                    for article in report['Articles']
-                                ]
-
-                               # Generate new audio file with both titles and summaries
-                                audio_file = generate_tts(audio_articles, report['Company'])
-                                report['Audio'] = audio_file  # Update report with new file path
-
-                            if os.path.exists(report['Audio']):
-                                # Display audio player
-                                st.audio(report['Audio'], format='audio/mp3')
-
-                                # Add download button
-                                with open(report['Audio'], "rb") as f:
-                                    st.download_button(
-                                        label="⬇️ Download Full Summary (Hindi)",
-                                        data=f,
-                                        file_name=f"{report['Company']}_news_summary.mp3",
-                                        mime="audio/mp3",
-                                        help="Download the Hindi audio summary of all articles"
-                                    )
-
-                                # Display what's included in the audio
-                                st.caption("This audio summary includes:")
-                                st.markdown("""
-                                - Company name introduction
-                                - All article titles
-                                - Summarized content for each article
-                                """)
-
-                            else:
-                                st.warning("Audio file could not be generated. Please try again.")
-
-                        except Exception as e:
-                            st.error(f"Failed to generate audio summary: {str(e)}")
-                            st.error("Please check your internet connection and try again.")
-                
-            except Exception as e:
-                st.error(f"Analysis failed: {str(e)}")
+            st.success(f"Predicted Category: {le.inverse_transform(prediction)[0]}")
 
 if __name__ == "__main__":
     main()
