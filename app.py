@@ -1,21 +1,26 @@
 import streamlit as st
 import docx
-import pickle
+import joblib
 import re
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 import numpy as np
-from encoder import LabelEncoder  # Assuming encoder.py contains a custom LabelEncoder
+import os
+import pickle
 
-# Download NLTK resources
-nltk.download('stopwords')
-nltk.download('wordnet')
-nltk.download('punkt')
+# Download NLTK resources only if not already downloaded
+nltk_data_path = os.path.join(os.path.expanduser("~"), "nltk_data")
+nltk.data.path.append(nltk_data_path)
+
+nltk.download('stopwords', download_dir=nltk_data_path)
+nltk.download('wordnet', download_dir=nltk_data_path)
+nltk.download('punkt', download_dir=nltk_data_path)
 
 # Initialize text processing tools
 lemmatizer = WordNetLemmatizer()
 stop_words = set(stopwords.words('english'))
+
 
 def extract_text_from_docx(file):
     """Extract text from DOCX file"""
@@ -46,15 +51,16 @@ def load_models():
     """Load all required models with caching"""
     try:
         # Load TF-IDF vectorizer
-        with open('tfidf.pkl', 'rb') as f:
-            tfidf = pickle.load(f)
+        with open("tfidf_vectorizer.pkl", "rb") as file:
+            tfidf = pickle.load(file)
         
         # Load Gradient Boosting model
-        with open('gradient_boosting.pkl', 'rb') as f:
-            model = pickle.load(f)
+        with open("gradient_boosting.pkl", "rb") as file:
+            model = pickle.load(file)
         
         # Initialize LabelEncoder (assuming encoder.py contains the class)
-        le = LabelEncoder()
+        with open("encoder.pkl", "rb") as file:
+            le = pickle.load(file)
         
         return tfidf, model, le
     except Exception as e:
